@@ -36,10 +36,10 @@ except ImportError:
 
 
 class BrotherLabelPlugin(MachineDriverMixin, InvenTreePlugin):
-    """Brother label printer driver plugin for InvenTree."""
+    """Brother label printer driver plugin for InvenTree with stencil tape support."""
 
-    AUTHOR = "Oliver Walters"
-    DESCRIPTION = "Label printing plugin for Brother printers"
+    AUTHOR = "Oliver Walters, Christoph Gasser"
+    DESCRIPTION = "Label printing plugin for Brother printers with stencil tape support"
     VERSION = BROTHER_PLUGIN_VERSION
 
     # Machine registry was added in InvenTree 0.14.0, use inventree-brother-plugin 0.9.0 for older versions
@@ -126,6 +126,16 @@ class BrotherLabelPrinterDriver(LabelPrinterBaseDriver):
                 "default": True,
                 "required": True,
             },
+            "SPECIAL_TAPE": {
+                "name": _("Use Special/Stencil Tape (PT only)"),
+                "description": _(
+                    "Enable when printing on Brother stencil/special tape. "
+                    "For PT-series only (e.g., PT-P900W). Auto-cut is disabled in this mode."
+                ),
+                "validator": bool,
+                "default": False,
+                "required": True,
+    },
         }
 
         super().__init__(*args, **kwargs)
@@ -180,6 +190,7 @@ class BrotherLabelPrinterDriver(LabelPrinterBaseDriver):
         ip_address = machine.get_setting("IP_ADDRESS", "D")
         usb_device = machine.get_setting("USB_DEVICE", "D")
         media_type = machine.get_setting("LABEL", "D")
+        special_tape = bool(machine.get_setting("SPECIAL_TAPE", "D"))
 
         # Get specifications of media type
         media_specs = None
@@ -224,7 +235,11 @@ class BrotherLabelPrinterDriver(LabelPrinterBaseDriver):
             red = False
 
         printer = BrotherQLRaster(model=model)
-
+        
+        # If stencil is on, cutting is ignored by the printer anyway; force cut=False to be explicit.
+        cut_enabled = machine.get_setting("AUTO_CUT", "D")
+        if special_tape and model.startswith("PT-"):
+            cut_enabled = False
         # Generate instructions for printing
         params = {
             "qlr": printer,
@@ -238,6 +253,17 @@ class BrotherLabelPrinterDriver(LabelPrinterBaseDriver):
         }
 
         instructions = convert(**params)
+
+        # --- Inject PT "Special Tape" mode if requested ---
+        # PT-series understands ESC i K {n1}, where bit 4 (0x10) enables Special Tape.
+        # We also send an ESC @ init for safety (harmless if already initialized).
+        if special_tape and model.startswith("PT-"):
+            prelude = [
+                b"\x1b\x40",                # ESC @  (Initialize)
+                b"\x1b\x69\x4b" + b"\x10",  # ESC i K {n1} with bit4=1 -> Special Tape ON
+            ]
+            # Prepend to the instruction stream
+            instructions = prelude + instructions
 
         # Select appropriate identifier and backend
         printer_id = ""
