@@ -34,7 +34,6 @@ except ImportError:
 
         pass
 
-
 class BrotherLabelPlugin(MachineDriverMixin, InvenTreePlugin):
     """Brother label printer driver plugin for InvenTree with stencil tape support."""
 
@@ -127,15 +126,12 @@ class BrotherLabelPrinterDriver(LabelPrinterBaseDriver):
                 "required": True,
             },
             "SPECIAL_TAPE": {
-                "name": _("Use Special/Stencil Tape (PT only)"),
-                "description": _(
-                    "Enable when printing on Brother stencil/special tape. "
-                    "For PT-series only (e.g., PT-P900W). Auto-cut is disabled in this mode."
-                ),
+                "name": _("Stencil / Special Tape"),
+                "description": _("Enable when using stencil rolls (PT-P900W)."),
                 "validator": bool,
                 "default": False,
                 "required": True,
-    },
+                },
         }
 
         super().__init__(*args, **kwargs)
@@ -236,10 +232,13 @@ class BrotherLabelPrinterDriver(LabelPrinterBaseDriver):
 
         printer = BrotherQLRaster(model=model)
         
-        # If stencil is on, cutting is ignored by the printer anyway; force cut=False to be explicit.
-        cut_enabled = machine.get_setting("AUTO_CUT", "D")
-        if special_tape and model.startswith("PT-"):
-            cut_enabled = False
+        # Enable stencil if requested
+        if machine.get_setting("SPECIAL_TAPE", "D"):
+            try:
+                printer.is_special_tape = True
+            except Exception:
+                pass
+
         # Generate instructions for printing
         params = {
             "qlr": printer,
@@ -253,17 +252,34 @@ class BrotherLabelPrinterDriver(LabelPrinterBaseDriver):
         }
 
         instructions = convert(**params)
+        
+        # --- Normalize to bytes (what send() actually wants) ---
+        if isinstance(instructions, (list, tuple)):
+            # If convert() returned chunks, join them
+            instructions = b"".join(
+                b if isinstance(b, (bytes, bytearray)) else bytes(b)
+                for b in instructions
+            )
+        else:
+            instructions = bytes(instructions)
 
         # --- Inject PT "Special Tape" mode if requested ---
         # PT-series understands ESC i K {n1}, where bit 4 (0x10) enables Special Tape.
         # We also send an ESC @ init for safety (harmless if already initialized).
         if special_tape and model.startswith("PT-"):
-            prelude = [
-                b"\x1b\x40",                # ESC @  (Initialize)
-                b"\x1b\x69\x4b" + b"\x10",  # ESC i K {n1} with bit4=1 -> Special Tape ON
-            ]
+            # prelude = [
+            #     b"\x1b\x40",                # ESC @  (Initialize)
+            #     b"\x1b\x69\x4b" + b"\x10",  # ESC i K {n1} with bit4=1 -> Special Tape ON
+            # ]
+            prelude = b"\x1b@\x1biK\x10"
             # Prepend to the instruction stream
             instructions = prelude + instructions
+
+        # Make sure it's a list of bytes for brother_ql.backends.send()
+        # if isinstance(instructions, (bytes, bytearray)):
+        #     instructions = [bytes(instructions)]
+        # elif isinstance(instructions, tuple):
+        #     instructions = list(instructions)
 
         # Select appropriate identifier and backend
         printer_id = ""
